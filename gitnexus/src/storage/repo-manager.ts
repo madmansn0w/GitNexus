@@ -63,8 +63,88 @@ export const getStoragePaths = (repoPath: string) => {
   return {
     storagePath,
     lbugPath: path.join(storagePath, 'lbug'),
+    lbugStagingPath: path.join(storagePath, 'lbug.next'),
+    lbugBackupPath: path.join(storagePath, 'lbug.prev'),
     metaPath: path.join(storagePath, 'meta.json'),
   };
+};
+
+export const getLbugArtifactPaths = (dbPath: string): string[] => {
+  return [dbPath, `${dbPath}.wal`, `${dbPath}.lock`];
+};
+
+const pathExists = async (targetPath: string): Promise<boolean> => {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const removeLbugArtifacts = async (dbPath: string): Promise<void> => {
+  for (const artifactPath of getLbugArtifactPaths(dbPath)) {
+    try {
+      await fs.rm(artifactPath, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+  }
+};
+
+export const moveLbugArtifacts = async (fromDbPath: string, toDbPath: string): Promise<void> => {
+  const suffixes = ['', '.wal', '.lock'];
+  let movedAny = false;
+
+  for (const suffix of suffixes) {
+    const fromPath = `${fromDbPath}${suffix}`;
+    if (!(await pathExists(fromPath))) continue;
+
+    const toPath = `${toDbPath}${suffix}`;
+    await fs.mkdir(path.dirname(toPath), { recursive: true });
+    await fs.rm(toPath, { recursive: true, force: true });
+    await fs.rename(fromPath, toPath);
+    movedAny = true;
+  }
+
+  if (!movedAny) {
+    throw new Error(`No LadybugDB artifacts found at ${fromDbPath}`);
+  }
+};
+
+export const replaceLbugArtifacts = async (
+  liveDbPath: string,
+  stagingDbPath: string,
+  backupDbPath: string,
+): Promise<void> => {
+  await removeLbugArtifacts(backupDbPath);
+
+  const hadLiveArtifacts = (await Promise.all(
+    getLbugArtifactPaths(liveDbPath).map(pathExists),
+  )).some(Boolean);
+
+  try {
+    if (hadLiveArtifacts) {
+      await moveLbugArtifacts(liveDbPath, backupDbPath);
+    }
+
+    await moveLbugArtifacts(stagingDbPath, liveDbPath);
+    await removeLbugArtifacts(backupDbPath);
+  } catch (error) {
+    if (hadLiveArtifacts) {
+      try {
+        await removeLbugArtifacts(liveDbPath);
+        await moveLbugArtifacts(backupDbPath, liveDbPath);
+      } catch (rollbackError) {
+        const rollbackMsg = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        const originalMsg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to replace LadybugDB index: ${originalMsg}. Rollback also failed: ${rollbackMsg}`);
+      }
+    }
+    throw error;
+  } finally {
+    await removeLbugArtifacts(stagingDbPath);
+  }
 };
 
 /**

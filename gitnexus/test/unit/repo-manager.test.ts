@@ -12,6 +12,8 @@ import {
   getStoragePath,
   getStoragePaths,
   readRegistry,
+  removeLbugArtifacts,
+  replaceLbugArtifacts,
   saveCLIConfig,
   loadCLIConfig,
 } from '../../src/storage/repo-manager.js';
@@ -40,13 +42,79 @@ describe('getStoragePaths', () => {
     const paths = getStoragePaths('/home/user/project');
     expect(paths.storagePath).toContain('.gitnexus');
     expect(paths.lbugPath).toContain('lbug');
+    expect(paths.lbugStagingPath).toContain('lbug.next');
+    expect(paths.lbugBackupPath).toContain('lbug.prev');
     expect(paths.metaPath).toContain('meta.json');
   });
 
   it('all paths are under storagePath', () => {
     const paths = getStoragePaths('/home/user/project');
     expect(paths.lbugPath.startsWith(paths.storagePath)).toBe(true);
+    expect(paths.lbugStagingPath.startsWith(paths.storagePath)).toBe(true);
+    expect(paths.lbugBackupPath.startsWith(paths.storagePath)).toBe(true);
     expect(paths.metaPath.startsWith(paths.storagePath)).toBe(true);
+  });
+});
+
+describe('LadybugDB artifact helpers', () => {
+  it('removeLbugArtifacts deletes db and sidecar files', async () => {
+    const tmpHandle = await createTempDir('gitnexus-lbug-cleanup-');
+    try {
+      const dbPath = path.join(tmpHandle.dbPath, 'lbug');
+      await fs.writeFile(dbPath, 'db');
+      await fs.writeFile(`${dbPath}.wal`, 'wal');
+      await fs.writeFile(`${dbPath}.lock`, 'lock');
+
+      await removeLbugArtifacts(dbPath);
+
+      await expect(fs.access(dbPath)).rejects.toThrow();
+      await expect(fs.access(`${dbPath}.wal`)).rejects.toThrow();
+      await expect(fs.access(`${dbPath}.lock`)).rejects.toThrow();
+    } finally {
+      await tmpHandle.cleanup();
+    }
+  });
+
+  it('replaceLbugArtifacts promotes staging db and removes temp files', async () => {
+    const tmpHandle = await createTempDir('gitnexus-lbug-swap-');
+    try {
+      const livePath = path.join(tmpHandle.dbPath, 'lbug');
+      const stagingPath = path.join(tmpHandle.dbPath, 'lbug.next');
+      const backupPath = path.join(tmpHandle.dbPath, 'lbug.prev');
+
+      await fs.writeFile(livePath, 'old-db');
+      await fs.writeFile(stagingPath, 'new-db');
+      await fs.writeFile(`${stagingPath}.wal`, 'new-wal');
+
+      await replaceLbugArtifacts(livePath, stagingPath, backupPath);
+
+      await expect(fs.readFile(livePath, 'utf-8')).resolves.toBe('new-db');
+      await expect(fs.readFile(`${livePath}.wal`, 'utf-8')).resolves.toBe('new-wal');
+      await expect(fs.access(stagingPath)).rejects.toThrow();
+      await expect(fs.access(backupPath)).rejects.toThrow();
+    } finally {
+      await tmpHandle.cleanup();
+    }
+  });
+
+  it('replaceLbugArtifacts restores live db if staging move fails', async () => {
+    const tmpHandle = await createTempDir('gitnexus-lbug-rollback-');
+    try {
+      const livePath = path.join(tmpHandle.dbPath, 'lbug');
+      const stagingPath = path.join(tmpHandle.dbPath, 'missing-staging');
+      const backupPath = path.join(tmpHandle.dbPath, 'lbug.prev');
+
+      await fs.writeFile(livePath, 'old-db');
+
+      await expect(
+        replaceLbugArtifacts(livePath, stagingPath, backupPath),
+      ).rejects.toThrow(/No LadybugDB artifacts found/);
+
+      await expect(fs.readFile(livePath, 'utf-8')).resolves.toBe('old-db');
+      await expect(fs.access(backupPath)).rejects.toThrow();
+    } finally {
+      await tmpHandle.cleanup();
+    }
   });
 });
 

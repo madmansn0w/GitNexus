@@ -104,8 +104,20 @@ const doInitLbug = async (dbPath: string) => {
   const parentDir = path.dirname(dbPath);
   await fs.mkdir(parentDir, { recursive: true });
 
-  db = new lbug.Database(dbPath);
-  conn = new lbug.Connection(db);
+  try {
+    db = new lbug.Database(dbPath);
+    await db.init();
+    conn = new lbug.Connection(db);
+  } catch (error) {
+    try { if (conn) await conn.close(); } catch {}
+    try { if (db) await db.close(); } catch {}
+    conn = null;
+    db = null;
+    currentDbPath = null;
+    ftsLoaded = false;
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to initialize LadybugDB at ${dbPath}: ${msg}`);
+  }
 
   for (const schemaQuery of SCHEMA_QUERIES) {
     try {
@@ -114,7 +126,13 @@ const doInitLbug = async (dbPath: string) => {
       // Only ignore "already exists" errors - log everything else
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes('already exists')) {
-        console.warn(`⚠️ Schema creation warning: ${msg.slice(0, 120)}`);
+        try { if (conn) await conn.close(); } catch {}
+        try { if (db) await db.close(); } catch {}
+        conn = null;
+        db = null;
+        currentDbPath = null;
+        ftsLoaded = false;
+        throw new Error(`Failed to initialize LadybugDB schema at ${dbPath}: ${msg}`);
       }
     }
   }
